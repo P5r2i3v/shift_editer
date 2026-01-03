@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>シフト作成ツール</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+:root{--gray:#5A5A5A;}
+body{background:#191919;color:#ddd;font-family:"Noto Sans JP","Meiryo",sans-serif;margin:0;}
+header{padding:14px 20px;font-size:22px;background:#252525;border-bottom:1px solid var(--gray);}
+.container{max-width:1100px;margin:auto;padding:20px;}
+.block{background:#252525;border:1px solid var(--gray);border-radius:10px;margin-bottom:18px;padding:15px;}
+input,select,button{background:#353535;color:#ddd;border:1px solid #555;padding:7px;border-radius:6px;}
+button{margin-right:12px}
+
+.badge{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px}
+
+.routeBtn{display:inline-block;padding:6px 9px;margin:3px;border-radius:6px;background:#2d2d2d;cursor:pointer}
+.routeBtn.active{background:#aa3333}
+
+table{width:100%;border-collapse:collapse;background:#fff}
+th,td{
+ border:2px solid #333;
+ padding:6px;
+ text-align:center;
+ color:#000;
+ width:90px;
+}
+
+.sat{color:#4aa3ff}
+.sun,.holiday{color:#ff6a6a}
+
+.editable{cursor:pointer}
+.editable:hover{outline:2px solid orange}
+
+.offCell{
+ position:relative;
+}
+.offCell::after{
+ content:"";
+ position:absolute;
+ left:0;top:0;right:0;bottom:0;
+ border-bottom:4px solid rgba(0,0,0,.8);
+ transform:skewX(-45deg);
+}
+
+button:disabled{opacity:.35}
+</style>
+</head>
+
+<body>
+
+<header>シフト作成ツール</header>
+
+<div class="container">
+
+<!-- ① -->
+<div class="block">
+<h2>① 期間設定</h2>
+
+西暦：
+<select id="year"></select>
+<select id="month"></select> 月
+<select id="startDay"></select> 日
+～
+<select id="endDay"></select> 日
+<button onclick="confirmRange()">確定</button>
+
+</div>
+
+<!-- ② -->
+<div class="block">
+<h2 id="staffTitle">② スタッフ登録</h2>
+
+名前 <input id="staffName">
+色 <input type="color" id="staffColor" value="#2158AA">
+
+勤務上限
+<select id="limit">
+<option value="">未選択</option>
+<option value="1">週1</option>
+<option value="2">週2</option>
+<option value="3">週3</option>
+<option value="4">週4</option>
+<option value="5">週5</option>
+<option value="6">週6</option>
+</select>
+
+<br><br>
+
+可能ルート：
+<span id="routesArea"></span>
+<button onclick="checkAll()">すべて</button>
+<button onclick="clearAll()">クリア</button>
+
+<br><br>
+
+固定休：
+<span id="fixedArea"></span>
+
+<br><br>
+
+<div id="orderArea" style="display:none;">
+順番入れ替え：
+<select id="orderSelect"></select>
+</div>
+
+<br>
+
+<button onclick="addStaff()">追加</button>
+<button id="editDoneBtn" onclick="finishStaffEdit()" style="display:none;">編集完了</button>
+
+<div id="staffList"></div>
+</div>
+
+<!-- ③ -->
+<div class="block">
+<h2>③ 休み設定</h2>
+<div id="holidayEdit"></div>
+</div>
+
+<!-- ④ 
+<div class="block">
+<div onclick="togglePref()" style="cursor:pointer;">
+▼ 特定ルート希望入力（対象者のみ）
+</div>
+<div id="prefPanel" style="display:none;">
+<div id="preferredRoutes"></div>
+</div>
+</div>-->
+
+<!-- ⑤ -->
+<div class="block">
+<h2>⑤ シフト作成 / 編集</h2>
+
+<button onclick="generate()">シフト作成</button>
+<!--<button id="regenBtn" onclick="generate()">シフト再作成</button>-->
+<button id="finishBtn" onclick="finishEdit()">編集完了</button>
+<button id="unlockBtn" onclick="unlockEdit()">編集解除</button>
+<button id="pdfBtn" onclick="downloadPDF()" disabled>PDF出力</button>
+
+<div id="warn" style="color:#ff6a6a"></div>
+<div id="result"></div>
+</div>
+
+</div>
+
+<script>
+
+const ROUTES=["山口A","大分","長崎","市内","山口B","北九州","佐賀"];
+const VIP="大坪商店";
+
+let staff=[],calendar=[],schedule=[],preferred={},holidaysJP={},locked=false;
+let editingIndex=null;
+
+fetch("https://holidays-jp.github.io/api/v1/date.json")
+.then(r=>r.json()).then(d=>holidaysJP=d);
+
+/* セレクト生成 */
+for(let y=2026;y<=2040;y++)year.innerHTML+=`<option>${y}</option>`;
+for(let i=1;i<=12;i++)month.innerHTML+=`<option>${i}</option>`;
+for(let i=1;i<=31;i++){
+ startDay.innerHTML+=`<option>${i}</option>`;
+ endDay.innerHTML+=`<option>${i}</option>`;
+}
+
+/* UI */
+function renderRouteChecks(){
+ routesArea.innerHTML=ROUTES.map(r=>`
+ <span class="routeBtn" onclick="this.classList.toggle('active')">${r}</span>
+ `).join("");
+}
+renderRouteChecks();
+
+function checkAll(){document.querySelectorAll("#routesArea .routeBtn").forEach(e=>e.classList.add("active"));}
+function clearAll(){document.querySelectorAll("#routesArea .routeBtn").forEach(e=>e.classList.remove("active"));}
+
+const WD="日月火水木金土";
+function renderFixed(){
+ fixedArea.innerHTML=[0,1,2,3,4,5,6].map(d=>`
+  <span class="routeBtn" data-d="${d}" onclick="this.classList.toggle('active')">${WD[d]}</span>
+ `).join("");
+}
+renderFixed();
+
+/* 期間確定 */
+function confirmRange(){
+ renderHoliday();
+ renderPreferred();
+}
+
+
+/* ===== スタッフ登録 ===== */
+
+function addStaff(){
+ let n=staffName.value.trim();
+ if(!n)return;
+
+ if(editingIndex!==null){
+  staff[editingIndex]=readStaff();
+  finishEditMode();
+  saveStaff();
+  renderAll();
+  return;
+ }
+
+ staff.push(readStaff());
+ finishEditMode();
+ saveStaff();
+ renderAll();
+}
+
+function readStaff(){
+ return{
+  name:staffName.value.trim(),
+  color:staffColor.value,
+  limit:limit.value==""?null:+limit.value,
+  routes:[...document.querySelectorAll("#routesArea .routeBtn.active")].map(e=>e.innerText),
+  fixed:[...document.querySelectorAll("#fixedArea .routeBtn.active")].map(e=>+e.dataset.d),
+  off:{},
+  want:false
+ };
+}
+
+function finishEditMode(){
+ editingIndex=null;
+ staffTitle.innerText="② スタッフ登録";
+ editDoneBtn.style.display="none";
+ staffName.value="";
+ staffColor.value="#2158AA";
+ limit.value="";
+ clearAll();
+ renderFixed();
+}
+
+function finishStaffEdit(){addStaff();}
+
+function deleteStaff(name){
+ staff=staff.filter(s=>s.name!==name);
+ saveStaff();
+ renderAll();
+}
+
+function editStaff(name){
+ editingIndex=staff.findIndex(s=>s.name===name);
+ let t=staff[editingIndex];
+
+ staffTitle.innerText="② スタッフ登録（編集中）";
+ editDoneBtn.style.display="inline-block";
+ 
+ staffName.value=t.name;
+ staffColor.value=t.color;
+ limit.value=t.limit??"";
+
+
+ clearAll();
+ document.querySelectorAll("#routesArea .routeBtn").forEach(e=>{
+  if(t.routes.includes(e.innerText))e.classList.add("active");
+ });
+
+ renderFixed();
+ document.querySelectorAll("#fixedArea .routeBtn").forEach(e=>{
+  if(t.fixed.includes(+e.dataset.d))e.classList.add("active");
+ });
+}
+
+function renderStaffList(){
+ let html="";
+ staff.forEach(s=>{
+  html+=`<div>
+   <span class="badge" style="background:${s.color}"></span>
+   ${s.name}（週${s.limit||"未"}）
+   <button onclick="deleteStaff('${s.name}')">削除</button>
+   <button onclick="editStaff('${s.name}')">編集</button>
+  </div>`;
+ });
+ staffList.innerHTML=html;
+}
+
+/* 保存 */
+function saveStaff(){localStorage.setItem("shiftStaff",JSON.stringify(staff));}
+function loadStaff(){let d=localStorage.getItem("shiftStaff");if(d)staff=JSON.parse(d);renderAll();}
+loadStaff();
+
+
+/* ===== ③休み設定 ===== */
+
+function buildCalendar(){
+ calendar=[];
+ const s=new Date(Number(year.value),Number(month.value)-1,Number(startDay.value)+1);
+ const e=new Date(Number(year.value),Number(month.value)-1,Number(endDay.value)+1);
+
+ let cur=new Date(s);
+ while(cur<=e){
+  let d=cur.toISOString().slice(0,10);
+  calendar.push({
+   full:d,
+   date:d.slice(5),
+   dow:(cur.getDay()+6)%7,
+   holiday:d in holidaysJP
+  });
+  cur.setDate(cur.getDate()+1);
+ }
+}
+
+function renderHoliday(){
+ buildCalendar();
+ let html="";
+
+ staff.forEach(s=>{
+  html+=`<h3>
+   <span class="badge" style="background:${s.color}"></span>${s.name}（週${s.limit||"未"}）
+   <button onclick="setAllOff('${s.name}')">すべて</button>
+   <button onclick="clearAllOff('${s.name}')">クリア</button>
+  </h3>`;
+
+  calendar.forEach(d=>{
+   if(s.off[d.full]===undefined)
+    s.off[d.full]=s.fixed.includes(d.dow);
+
+   let on=s.off[d.full];
+   html+=`<span onclick="toggleOff('${s.name}','${d.full}',this)"
+     style="display:inline-block;padding:6px 9px;margin:3px;border-radius:6px;background:${on?'#552222':'#353535'}">
+     ${parseInt(d.date.slice(0,2))}/${parseInt(d.date.slice(3,5))}（${WD[d.dow]}）
+     </span>`;
+  });
+ });
+
+ holidayEdit.innerHTML=html;
+}
+
+function toggleOff(name,date,el){
+ let t=staff.find(s=>s.name==name);
+ t.off[date]=!t.off[date];
+ el.style.background=t.off[date]?'#552222':'#353535';
+ saveStaff();
+}
+
+function setAllOff(name){
+ let t=staff.find(s=>s.name==name);
+ calendar.forEach(d=>t.off[d.full]=true);
+ renderHoliday();saveStaff();
+}
+function clearAllOff(name){
+ let t=staff.find(s=>s.name==name);
+ calendar.forEach(d=>t.off[d.full]=false);
+ renderHoliday();saveStaff();
+}
+
+
+/* ===== ④ 希望 ===== */
+function togglePref(){prefPanel.style.display=prefPanel.style.display=="none"?"block":"none";}
+function renderPreferred(){}
+
+
+/* ===== ⑤ シフト作成 ===== */
+
+function generate(){
+
+ locked=false;
+ pdfBtn.disabled=true;
+
+ buildCalendar();
+ schedule=calendar.map(d=>({date:d.full,assign:[]}));  
+
+ /* --- 大坪商店は最優先で確保 --- */
+ const vip=staff.find(s=>s.name===VIP);
+
+ if(vip){
+  calendar.forEach(d=>{
+   if(!vip.off[d.full]){
+    schedule.find(x=>x.date===d.full).assign.push({
+     route:"大分",
+     staff:VIP
+    });
+   }
+  });
+ }
+
+ /* --- 他スタッフ割当（最小候補優先） --- */
+
+ calendar.forEach(d=>{
+  ROUTES.forEach(route=>{
+   //if(route==="市内" && vip) return; // 市内はVIP枠
+
+   let row=schedule.find(x=>x.date===d.full);
+   if(row.assign.some(a=>a.route===route))return;
+
+   let cand=staff.filter(s=>
+    s.name!==VIP &&
+    s.routes.includes(route)&&
+    !s.off[d.full]&&
+    !row.assign.some(a=>a.staff===s.name)
+   );
+
+   cand.sort((a,b)=>a.routes.length-b.routes.length);
+
+   let pick=cand[0];
+   if(pick){
+    row.assign.push({route,staff:pick.name});
+   }
+  });
+ });
+
+ /* --- 同一ルート1人化（変更>休み） --- */
+
+ calendar.forEach(d=>{
+  let row=schedule.find(x=>x.date===d.full).assign;
+
+  ROUTES.forEach(route=>{
+   let dup=row.filter(a=>a.route===route);
+   while(dup.length>1){
+    let t=dup
+     .filter(a=>a.staff!==VIP)
+     .sort((a,b)=>
+       (staff.find(s=>s.name===b.staff).routes.length)-
+       (staff.find(s=>s.name===a.staff).routes.length)
+     ).pop();
+
+    if(!t)break;
+
+    let st=staff.find(s=>s.name===t.staff);
+
+    let newR=ROUTES.find(r=>
+     r!==route &&
+     st.routes.includes(r) &&
+     !row.some(a=>a.route===r)
+    );
+
+    if(newR)t.route=newR;
+    else{
+     t.route=null;
+    }
+   }
+  });
+ });
+
+ /* --- 3連続禁止（例外:1ルート勢） --- */
+
+ staff.forEach(s=>{
+  for(let i=2;i<calendar.length;i++){
+   let d2=schedule.find(x=>x.date===calendar[i].full);
+   let d1=schedule.find(x=>x.date===calendar[i-1].full);
+   let d0=schedule.find(x=>x.date===calendar[i-2].full);
+   let r2=d2.assign.find(a=>a.staff===s.name)?.route;
+   let r1=d1.assign.find(a=>a.staff===s.name)?.route;
+   let r0=d0.assign.find(a=>a.staff===s.name)?.route;
+
+   if(r2&&r1&&r0&&r2===r1&&r1===r0&&s.routes.length>1){
+    let alt=ROUTES.find(r=>r!==r2&&s.routes.includes(r)&&!d2.assign.some(a=>a.route===r));
+    if(alt){
+     d2.assign.forEach(a=>{if(a.staff===s.name)a.route=alt;});
+    }else{
+     d2.assign=d2.assign.filter(a=>a.staff!==s.name);
+    }
+   }
+  }
+ });
+
+ /* --- 勤務上限＝連続日制御 --- */
+
+ staff.forEach(s=>{
+  let streak=0;
+  calendar.forEach(d=>{
+   let day=schedule.find(x=>x.date===d.full);
+   let work=day.assign.some(a=>a.staff===s.name&&a.route);
+   if(work){
+    streak++;
+    if(s.limit && streak> s.limit){
+     day.assign=day.assign.filter(a=>a.staff!==s.name);
+     s.off[d.full]=true;
+     streak=0;
+    }
+   }else streak=0;
+  });
+ });
+
+ /* --- 最終補充 --- */
+
+ calendar.forEach(d=>{
+  let row=schedule.find(x=>x.date===d.full);
+
+  ROUTES.forEach(route=>{
+   if(row.assign.some(a=>a.route===route))return;
+
+   let cand=staff.filter(s=>
+    !s.off[d.full] &&
+    s.routes.includes(route) &&
+    !row.assign.some(a=>a.staff===s.name) &&
+    !wouldCause3Repeat(s.name,d.full,route) &&
+    !isLimitExceeded(s,d.full)
+   );
+
+   cand.sort((a,b)=>b.routes.length-a.routes.length);
+
+   if(cand[0]){
+    row.assign.push({route,staff:cand[0].name});
+   }
+  });
+ });
+
+ renderResult();
+ detectShortage();
+}
+
+/* 3連続確認 */
+function wouldCause3Repeat(name,date,route){
+ let idx=calendar.findIndex(d=>d.full===date);
+ let prev1=schedule.find(x=>x.date===calendar[idx-1]?.full)?.assign.find(a=>a.staff===name)?.route;
+ let prev2=schedule.find(x=>x.date===calendar[idx-2]?.full)?.assign.find(a=>a.staff===name)?.route;
+ return prev1===route && prev2===route;
+ 
+}
+
+
+/* 上限確認 */
+function isLimitExceeded(s,date){
+ let idx=calendar.findIndex(d=>d.full===date);
+ let streak=0;
+ for(let i=idx-1;i>=0;i--){
+  let day=schedule.find(x=>x.date===calendar[i].full);
+  if(day.assign.some(a=>a.staff===s.name&&a.route))streak++;
+  else break;
+ }
+ return s.limit && streak>=s.limit;
+}
+
+
+/* ===== 出力 ===== */
+function renderResult(){
+ let html=`<table>
+ <tr><th rowspan="2"></th>`;
+
+ calendar.forEach(d=>{
+  const m=parseInt(d.date.slice(0,2),10);
+  const day=parseInt(d.date.slice(3,5),10);
+  html+=`<th>${m}月${day}日</th>`;
+ });
+
+ html+=`</tr><tr>`;
+
+ calendar.forEach(d=>{
+  let w="日月火水木金土"[d.dow];
+  let cls=d.holiday||d.dow==0?"sun":d.dow==6?"sat":"";
+  html+=`<th class="${cls}">${w}</th>`;
+ });
+
+ html+="</tr>";
+
+ staff.forEach(s=>{
+  html+=`<tr style="background:${s.color}">
+   <td style="background:${s.color}">${s.name}</td>`;
+
+  calendar.forEach(d=>{
+   let day=schedule.find(x=>x.date===d.full);
+   let hit=day.assign.find(a=>a.staff===s.name);
+   html+=`<td class="${!locked?'editable':''}" onclick="cellClick('${d.full}','${s.name}',this)">
+     ${hit&&hit.route?hit.route:""}
+   </td>`;
+  });
+
+  html+="</tr>";
+ });
+
+ html+="</table>";
+ result.innerHTML=html;
+}
+
+/* セル編集 */
+function cellClick(date,name,cell){
+ if(locked)return;
+ let route=prompt("ルート入力（空で削除）",cell.innerText);
+ if(route===null)return;
+ route=route.trim();
+ if(route!==""&&!ROUTES.includes(route))return alert("対象外");
+
+ let day=schedule.find(x=>x.date===date);
+ day.assign=day.assign.filter(a=>a.staff!==name);
+ if(route!=="")day.assign.push({route,staff:name});
+
+ renderResult();detectShortage();
+}
+
+/* 編集完了 */
+function finishEdit(){
+ locked=true;
+ pdfBtn.disabled=false;
+ document.querySelectorAll("#result td").forEach(td=>{
+ td.onclick=null;
+ });
+}
+
+/* 解除 */
+function unlockEdit(){
+ locked=false;
+ pdfBtn.disabled=true;
+ document.querySelectorAll("#result td").forEach(td=>td.classList.remove("offCell"));
+ renderResult();
+ detectShortage();
+}
+
+/* 不足検知 */
+function detectShortage(){
+ let s=[];
+ schedule.forEach(d=>ROUTES.forEach(r=>{
+  if(!d.assign.some(a=>a.route===r))s.push(d.date);
+ }));
+ warn.innerText=s.length?[...new Set(s)].join("・")+" に人不足あり":"";
+}
+
+/* PDF */
+async function downloadPDF(){
+ if(!locked)return;
+ const{jsPDF}=window.jspdf;
+ const pdf=new jsPDF("l","pt","a4");
+ const table=document.getElementById("result");
+
+ const canvas=await html2canvas(table,{scale:3,backgroundColor:"#fff"});
+ const img=canvas.toDataURL("image/png");
+
+ const pageWidth=pdf.internal.pageSize.getWidth()-35;
+ const margin=30;
+ const imgW=pageWidth-margin*2+20;
+ const ratio=imgW/canvas.width;
+ const imgH=canvas.height*ratio;
+
+ pdf.addImage(img,"PNG",margin,margin,imgW,imgH);
+ pdf.save(`${month.value}${startDay.value}-${month.value}${endDay.value}.pdf`);
+}
+
+function renderAll(){
+ renderStaffList();
+ renderHoliday();
+}
+
+</script>
+
+</body>
+</html>
